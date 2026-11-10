@@ -2,7 +2,8 @@
 import * as db from "./db.js?v=20261005-minutos1";
 import { esc, $, $$, num, brl, fdate, hoje, addDias, hora, toast, alerta, heading, card, row, exp, metric, tip,
   inp, inum, idate, itxt, isel, ichk, icombo, comboValor, tabela, modal, verImagem, imagemSegura, confirmar, baixarCSV } from "./ui.js?v=20261005-minutos1";
-import { paginaAdmin } from "./admin.js?v=20261016-materiais2";
+import { paginaAdmin } from "./admin.js?v=20261110-inspecoes";
+import * as insp from "./inspecoes.js?v=20261110-inspecoes";
 import { kgMaterial } from './materiais.js?v=20261016-materiais2';
 import { definirPeso, processoLinha, custosRetrabalho, calcularProcessos, converterRetrabalho, telaRetrabalho, ligarRetrabalho, erroRetrabalho, selecaoPendente } from './retrabalho.js?v=20261016-materiais2';
 
@@ -360,21 +361,39 @@ function painel(el, f) {
     box.append(d);
   }
 }
-function painelMetas(el, f) {
+async function painelMetas(el, f) {
   const sp = S.cfg.setor_params || {};
-  const lista = Object.keys(sp).filter((s) => setUser().includes(s) && (!f.setor || s === f.setor) && (sp[s].meta_rnc_mes != null || sp[s].meta_custo_mes != null)).sort();
+  const lista = Object.keys(sp).filter((s) => setUser().includes(s) && (!f.setor || s === f.setor) && (sp[s].meta_rnc_mes != null || sp[s].meta_custo_mes != null || sp[s].processo_planilha)).sort();
   if (!lista.length) return (el.innerHTML = alerta("info", "Nenhuma meta cadastrada para os setores selecionados."));
+  let ins = null, erroInsp = "";
+  if (lista.some((s) => sp[s].processo_planilha)) {
+    try { ins = await insp.dados(); } catch (e) { erroInsp = e.message; }
+    if (!el.isConnected) return;
+  }
   const [ai, mi] = f.de.split("-").map(Number), [af, mf] = f.ate.split("-").map(Number);
   const meses = (af - ai) * 12 + mf - mi + 1;
   const linhas = lista.map((s) => {
     const R = S.rnc.filter((r) => r.setor_origem === s && String(r.data).slice(0, 10) >= f.de && String(r.data).slice(0, 10) <= f.ate);
     const qtd = R.length, cst = R.reduce((a, r) => a + custo(r), 0);
     const mr = sp[s].meta_rnc_mes != null ? num(sp[s].meta_rnc_mes) * meses : null, mc = sp[s].meta_custo_mes != null ? num(sp[s].meta_custo_mes) * meses : null;
-    const ok = (mr == null || qtd <= mr) && (mc == null || cst <= mc);
-    return { setor: s, rncs: qtd, meta_rnc: mr ?? "—", custo: cst, meta_custo: mc ?? "", sit: ok ? "🟢 Dentro da meta" : "🔴 Acima da meta" };
+    // Máq. NC = Σ qtd_nc das RNCs do setor (RNC sem quantidade conta 1) ÷ máquinas inspecionadas no processo ligado.
+    let mInsp = "", mNc = "", pct = "", mPct = "", okPct = true;
+    if (sp[s].processo_planilha && ins) {
+      const tot = insp.total(ins, sp[s].processo_planilha, f.de, f.ate);
+      const nc = R.reduce((a, r) => a + (num(r.qtd_nc) || 1), 0);
+      const meta = num(sp[s].meta_pct_nc ?? insp.META_PCT_PADRAO);
+      mInsp = tot; mNc = nc; mPct = `${meta.toLocaleString("pt-BR")}%`;
+      if (tot) { const v = (nc / tot) * 100; pct = `${v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`; okPct = v <= meta; }
+      else pct = "—";
+    }
+    const ok = (mr == null || qtd <= mr) && (mc == null || cst <= mc) && okPct;
+    return { setor: s, rncs: qtd, meta_rnc: mr ?? "—", custo: cst, meta_custo: mc ?? "", maq_insp: mInsp, maq_nc: mNc, pct_nc: pct, meta_pct: mPct, sit: ok ? "🟢 Dentro da meta" : "🔴 Acima da meta" };
   });
   el.innerHTML = `<h4>Metas por setor — período de ${meses} ${meses === 1 ? "mês" : "meses"} (meta mensal × meses)</h4>` +
-    tabela([["setor", "Setor"], ["rncs", "RNCs", "num"], ["meta_rnc", "Meta RNCs", "num"], ["custo", "Custo NC (R$)", "brl"], ["meta_custo", "Meta custo (R$)", "brl"], ["sit", "Situação"]], linhas);
+    (erroInsp ? alerta("warn", esc(erroInsp)) : "") +
+    tabela([["setor", "Setor"], ["rncs", "RNCs", "num"], ["meta_rnc", "Meta RNCs", "num"], ["custo", "Custo NC (R$)", "brl"], ["meta_custo", "Meta custo (R$)", "brl"],
+      ["maq_insp", "Máq. inspecionadas", "num"], ["maq_nc", "Máq. NC", "num"], ["pct_nc", "% NC", "num"], ["meta_pct", "Meta % NC", "num"], ["sit", "Situação"]], linhas) +
+    (ins ? `<p style="font-size:.8rem;opacity:.7">Inspeções consideradas a partir de ${esc(fdate(ins.desde))} (planilha lida em ${esc(fdate(String(ins.atualizado).slice(0, 10)))}).</p>` : "");
 }
 
 // ---------------- Não conformidades (lista) ----------------

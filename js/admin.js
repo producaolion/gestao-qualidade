@@ -3,6 +3,7 @@ import * as db from "./db.js?v=20261005-minutos1";
 import { esc, $, $$, num, brl, toast, alerta, heading, card, row, inp, isel, ichk, tabela, confirmar } from "./ui.js?v=20261005-minutos1";
 import { editorFluxo } from './fluxo-admin.js?v=20261016-materiais2';
 import { abaMateriais } from './materiais.js?v=20261016-materiais2';
+import * as insp from "./inspecoes.js?v=20261110-inspecoes";
 
 const ABAS = ["Setores e metas", "Defeitos por setor", "Usuários", "Máquinas", "Ficha técnica", "🧱 Materiais", "📐 Áreas", "🔒 Segurança", "🗑 Dados", "Diagrama de processos"];
 let aba = 0;
@@ -40,11 +41,18 @@ function ligarGrade(box, cols, onSave) {
   $("[data-save]", box).onclick = () => onSave($$("tr", tb).map((tr) => Object.fromEntries($$("input,select", tr).map((i) => [i.dataset.c, i.value.trim()]))));
 }
 
-function setores(box, { S }, again) {
+async function setores(box, { S }, again) {
+  box.innerHTML = alerta("info", "Carregando setores da planilha de inspeção…");
+  let procs = [], erroInsp = "";
+  try { procs = (await insp.dados()).processos || []; } catch (e) { erroInsp = e.message; }
+  if (!box.isConnected) return; // trocou de aba durante o carregamento
   const sp = S.cfg.setor_params || {};
-  const cols = [["setor", "Setor"], ["hora_media", "Hora média (R$/h)", "num"], ["meta_rnc_mes", "Meta RNCs/mês (máx.)", "num"], ["meta_custo_mes", "Meta custo NC/mês (R$ máx.)", "num"], ["maq_igual", "Máquina = tempo da mão de obra", "sel", ["Sim", "Não"]]];
-  const linhas = Object.keys(S.cfg.setores || {}).map((s) => ({ setor: s, ...(sp[s] || {}), maq_igual: sp[s]?.maq_igual_mo ? "Sim" : "Não" }));
-  box.innerHTML = alerta("info", "A <b>hora média</b> é usada no cálculo do custo das RNCs do setor de origem. As <b>metas</b> são mensais e aparecem na Visão geral. Em setores com <b>Máquina = tempo da mão de obra</b> = Sim, o retrabalho com mão de obra apropria o mesmo tempo à máquina (automático, com opção de edição manual).") +
+  const cols = [["setor", "Setor"], ["hora_media", "Hora média (R$/h)", "num"], ["meta_rnc_mes", "Meta RNCs/mês (máx.)", "num"], ["meta_custo_mes", "Meta custo NC/mês (R$ máx.)", "num"], ["maq_igual", "Máquina = tempo da mão de obra", "sel", ["Sim", "Não"]],
+    ["processo_planilha", "Setor na planilha de inspeção", "sel", procs], ["meta_pct_nc", "Meta % máq. NC/inspecionadas", "num"]];
+  const linhas = Object.keys(S.cfg.setores || {}).map((s) => ({ setor: s, ...(sp[s] || {}), maq_igual: sp[s]?.maq_igual_mo ? "Sim" : "Não", meta_pct_nc: sp[s]?.meta_pct_nc ?? insp.META_PCT_PADRAO }));
+  box.innerHTML = alerta("info", "A <b>hora média</b> é usada no cálculo do custo das RNCs do setor de origem. As <b>metas</b> são mensais e aparecem na Visão geral. Em setores com <b>Máquina = tempo da mão de obra</b> = Sim, o retrabalho com mão de obra apropria o mesmo tempo à máquina (automático, com opção de edição manual). " +
+    "<b>Setor na planilha de inspeção</b> liga o setor a um processo (coluna F) da planilha de inspeção; o painel de metas compara as máquinas com NC sobre as inspecionadas no período com a <b>Meta %</b> (padrão 5%).") +
+    (erroInsp ? alerta("warn", esc(erroInsp)) : "") +
     card(grade(cols, linhas)) + card(row("c2", inp("chp", "Custo hora padrão (R$/h) — setores sem hora média", S.cfg.parametros.custo_hora_padrao, { type: "number" }),
       inp("ref", "Atualização automática das telas (segundos)", S.cfg.parametros.refresh_segundos, { type: "number" })) + `<button class="btn primary" id="par">💾 Salvar parâmetros</button>`, "Parâmetros");
   ligarGrade(box, cols, async (rows) => {
@@ -55,7 +63,8 @@ function setores(box, { S }, again) {
     if (removidos.length && !(await confirmar(`Remover os setores: ${removidos.join(", ")}?`, "Remover"))) return;
     const setoresNovos = Object.fromEntries(nomes.map((n) => [n, S.cfg.setores[n] || []]));
     const params = Object.fromEntries(rows.map((r) => [r.setor, { hora_media: r.hora_media === "" ? null : num(r.hora_media),
-      meta_rnc_mes: r.meta_rnc_mes === "" ? null : num(r.meta_rnc_mes), meta_custo_mes: r.meta_custo_mes === "" ? null : num(r.meta_custo_mes), maq_igual_mo: r.maq_igual === "Sim" }]));
+      meta_rnc_mes: r.meta_rnc_mes === "" ? null : num(r.meta_rnc_mes), meta_custo_mes: r.meta_custo_mes === "" ? null : num(r.meta_custo_mes), maq_igual_mo: r.maq_igual === "Sim",
+      processo_planilha: r.processo_planilha || null, meta_pct_nc: r.meta_pct_nc === "" ? insp.META_PCT_PADRAO : num(r.meta_pct_nc) }]));
     await db.salvarConfig("setores", setoresNovos); await salvarCfg("setor_params", params, again, "Setores salvos.");
   });
   $("#par").onclick = () => salvarCfg("parametros", { ...S.cfg.parametros, custo_hora_padrao: num($("[data-k=chp]").value), refresh_segundos: Math.max(10, num($("[data-k=ref]").value)) }, again);
