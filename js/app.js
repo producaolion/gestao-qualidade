@@ -283,10 +283,12 @@ function painel(el, f) {
   el.innerHTML = `<div class="metrics">${k.join("")}</div>` + exp("Outros indicadores", `<div class="metrics">${k2.join("")}</div>`) +
     `<div class="tabs">${abas.map((t, i) => `<button class="${i === aba ? "on" : ""}" data-s="${i}">${t}</button>`).join("")}</div>` +
     (aba < 3 ? `<div class="tabs" style="margin-top:-.4rem">${[["d", "🗓️ Dia a dia"], ["m", "📅 Mês a mês"], ["a", "📆 Ano a ano"]].map(([v, t]) => `<button class="${v === visao ? "on" : ""}" data-v="${v}">${t}</button>`).join("")}</div>` : "") +
+    `<div class="card" id="g-insp"><div class="ttl">% de máquinas com NC sobre inspecionadas</div><div class="caption">Carregando inspeções…</div></div>` +
     (R.length ? `<div class="row c2" id="g-ch"></div>` : alerta("info", "Sem dados no período.")) +
     `<div class="caption">Top 10 = soma do período filtrado. Atualizado às ${hora()}</div>`;
   $$("[data-s]", el).forEach((b) => (b.onclick = () => { S.filtros.painelSub = +b.dataset.s; painel(el, f); }));
   $$("[data-v]", el).forEach((b) => (b.onclick = () => { S.filtros.painelVisao = b.dataset.v; painel(el, f); }));
+  graficoInsp(el, f);
   if (!R.length) return;
   if (aba === 1 && !fichaCache) { ficha().then(() => painel(el, f)); return; }
   const box = $("#g-ch");
@@ -361,6 +363,38 @@ function painel(el, f) {
     box.append(d);
   }
 }
+// % de máquinas com NC sobre máquinas inspecionadas (planilha) do setor no período. Máq. NC = Σ qtd_nc (RNC sem qtd conta 1).
+function indInsp(s, f, ins) {
+  const sp = (S.cfg.setor_params || {})[s] || {};
+  if (!sp.processo_planilha || !ins) return null;
+  const tot = insp.total(ins, sp.processo_planilha, f.de, f.ate);
+  const nc = S.rnc.filter((r) => r.setor_origem === s && String(r.data).slice(0, 10) >= f.de && String(r.data).slice(0, 10) <= f.ate)
+    .reduce((a, r) => a + (num(r.qtd_nc) || 1), 0);
+  const meta = num(sp.meta_pct_nc ?? insp.META_PCT_PADRAO);
+  return { tot, nc, meta, pct: tot ? (nc / tot) * 100 : null };
+}
+// Gráfico sempre visível em Resultados e indicadores: % NC/inspecionadas por setor × meta.
+async function graficoInsp(el, f) {
+  const sp = S.cfg.setor_params || {};
+  const setores = Object.keys(sp).filter((s) => sp[s].processo_planilha && setUser().includes(s) && (!f.setor || s === f.setor)).sort();
+  const box = $("#g-insp", el);
+  if (!box) return;
+  if (!setores.length) { box.innerHTML = `<div class="ttl">% de máquinas com NC sobre inspecionadas</div>` + alerta("info", "Nenhum setor ligado à planilha de inspeção (Administração → Setores e metas)."); return; }
+  let ins;
+  try { ins = await insp.dados(); } catch (e) { if (box.isConnected) box.innerHTML = alerta("warn", esc(e.message)); return; }
+  if (!box.isConnected) return;
+  const q = setores.map((s) => [s, indInsp(s, f, ins)]).filter(([, v]) => v);
+  box.innerHTML = `<div class="ttl">% de máquinas com NC sobre inspecionadas — por setor</div><div class="chart"><canvas></canvas></div>`;
+  const cor = q.map(([, v]) => (v.pct != null && v.pct > v.meta ? "#c0504d" : "#3a8f5c"));
+  const fmt = (v) => `${Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`;
+  grafico($("canvas", box), { type: "bar", legend: true,
+    data: { labels: q.map(([s]) => s), datasets: [
+      { label: "% NC", data: q.map(([, v]) => (v.pct == null ? null : +v.pct.toFixed(2))), backgroundColor: cor, order: 2 },
+      { label: "Meta %", type: "line", data: q.map(([, v]) => v.meta), borderColor: "#1f2a44", backgroundColor: "#1f2a44", borderDash: [6, 4], pointRadius: 3, order: 1 }] },
+    options: { scales: { y: { beginAtZero: true, ticks: { callback: (v) => fmt(v) } } },
+      plugins: { tooltip: { callbacks: { label: (c) => { const v = q[c.dataIndex][1];
+        return c.dataset.type === "line" ? `Meta: ${fmt(v.meta)}` : `% NC: ${v.pct == null ? "—" : fmt(v.pct)} (${v.nc} NC / ${v.tot} inspecionadas)`; } } } } } });
+}
 async function painelMetas(el, f) {
   const sp = S.cfg.setor_params || {};
   const lista = Object.keys(sp).filter((s) => setUser().includes(s) && (!f.setor || s === f.setor) && (sp[s].meta_rnc_mes != null || sp[s].meta_custo_mes != null || sp[s].processo_planilha)).sort();
@@ -378,16 +412,19 @@ async function painelMetas(el, f) {
     const mr = sp[s].meta_rnc_mes != null ? num(sp[s].meta_rnc_mes) * meses : null, mc = sp[s].meta_custo_mes != null ? num(sp[s].meta_custo_mes) * meses : null;
     // Máq. NC = Σ qtd_nc das RNCs do setor (RNC sem quantidade conta 1) ÷ máquinas inspecionadas no processo ligado.
     let mInsp = "", mNc = "", pct = "", mPct = "", okPct = true;
-    if (sp[s].processo_planilha && ins) {
-      const tot = insp.total(ins, sp[s].processo_planilha, f.de, f.ate);
-      const nc = R.reduce((a, r) => a + (num(r.qtd_nc) || 1), 0);
-      const meta = num(sp[s].meta_pct_nc ?? insp.META_PCT_PADRAO);
-      mInsp = tot; mNc = nc; mPct = `${meta.toLocaleString("pt-BR")}%`;
-      if (tot) { const v = (nc / tot) * 100; pct = `${v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`; okPct = v <= meta; }
+    const q = ins ? indInsp(s, f, ins) : null;
+    if (q) {
+      mInsp = q.tot; mNc = q.nc; mPct = `${q.meta.toLocaleString("pt-BR")}%`;
+      if (q.pct != null) { pct = `${q.pct.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`; okPct = q.pct <= q.meta; }
       else pct = "—";
     }
-    const ok = (mr == null || qtd <= mr) && (mc == null || cst <= mc) && okPct;
-    return { setor: s, rncs: qtd, meta_rnc: mr ?? "—", custo: cst, meta_custo: mc ?? "", maq_insp: mInsp, maq_nc: mNc, pct_nc: pct, meta_pct: mPct, sit: ok ? "🟢 Dentro da meta" : "🔴 Acima da meta" };
+    // Situação mostra QUAL meta estourou (antes era um único "Acima da meta" que misturava RNCs, custo e % NC).
+    const acima = [];
+    if (mr != null && qtd > mr) acima.push("RNCs");
+    if (mc != null && cst > mc) acima.push("custo");
+    if (!okPct) acima.push("% NC");
+    return { setor: s, rncs: qtd, meta_rnc: mr ?? "—", custo: cst, meta_custo: mc ?? "", maq_insp: mInsp, maq_nc: mNc,
+      pct_nc: pct ? `${okPct ? "🟢" : "🔴"} ${pct}` : "", meta_pct: mPct, sit: acima.length ? `🔴 Acima: ${acima.join(", ")}` : "🟢 Dentro das metas" };
   });
   el.innerHTML = `<h4>Metas por setor — período de ${meses} ${meses === 1 ? "mês" : "meses"} (meta mensal × meses)</h4>` +
     (erroInsp ? alerta("warn", esc(erroInsp)) : "") +
